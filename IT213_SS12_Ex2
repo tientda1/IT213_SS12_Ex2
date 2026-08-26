@@ -1,0 +1,59 @@
+# Bài 2: Dò Lỗi & Tối Ưu Cấu Hình — Xử Lý Bẫy Ô Nhiễm Standard Output (Stdio Pollution)
+
+## 1. Phân Tích Nguyên Nhân Kỹ Thuật (Stdio Pollution)
+
+Giao thức MCP khi chạy ở chế độ **Stdio Transport** phụ thuộc hoàn toàn vào hai luồng dữ liệu chuẩn của hệ điều hành:
+*   **Standard Input (stdin):** Để nhận tín hiệu (request) từ MCP Client.
+*   **Standard Output (stdout / System.out):** Để gửi phản hồi (response) dưới định dạng **JSON-RPC thuần túy**.
+
+Khi Spring Boot khởi động, theo mặc định, nó sẽ in Banner ASCII và các dòng log trạng thái ra luồng `System.out`. MCP Client (Claude Desktop) liên tục lắng nghe luồng này và cố gắng phân tích cú pháp (parse) mọi dữ liệu đến thành chuỗi JSON. Do Banner và log hệ thống là văn bản thô (plain text) chứ không phải JSON hợp lệ, trình phân tích cú pháp của Client lập tức báo lỗi `Unexpected token` và ngắt kết nối để bảo vệ hệ thống.
+
+## 2. Bản Vá Mã Nguồn Java
+
+Để tắt Banner quảng cáo, chúng ta cần tùy chỉnh lại cấu hình khởi động của `SpringApplication` thay vì dùng phương thức `run` tĩnh mặc định:
+
+```java
+package com.rikkei.mcp;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.Banner;
+
+@SpringBootApplication
+public class LogisticsMcpServerApplication {
+    public static void main(String[] args) {
+        SpringApplication app = new SpringApplication(LogisticsMcpServerApplication.class);
+        // Tắt hoàn toàn Banner khởi động để tránh làm bẩn luồng stdout
+        app.setBannerMode(Banner.Mode.OFF);
+        app.run(args);
+    }
+}
+```
+
+## 3. Bản Vá Cấu Hình Logback
+
+Bạn cần tạo hoặc ghi đè tệp `src/main/resources/logback-spring.xml`. Cấu hình dưới đây sẽ chỉ định `ConsoleAppender` đẩy toàn bộ log (INFO, DEBUG, ERROR) sang luồng `System.err`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Định nghĩa Appender ghi ra luồng Standard Error -->
+    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Áp dụng Appender cho toàn bộ log từ mức INFO trở lên -->
+    <root level="INFO">
+        <appender-ref ref="STDERR" />
+    </root>
+</configuration>
+```
+
+## 4. Giải Thích Cơ Chế System.err
+
+*   Hệ điều hành phân tách luồng dữ liệu đầu ra thành hai kênh độc lập: **stdout (file descriptor 1)** dành cho dữ liệu chính của chương trình, và **stderr (file descriptor 2)** dành cho thông báo lỗi hoặc log chẩn đoán.
+*   MCP Client được thiết kế chỉ "bắt" và đọc dữ liệu từ luồng `stdout`.
+*   Khi chuyển hướng log sang `System.err`, dữ liệu log sẽ "đi vòng" qua một kênh vật lý khác. MCP Client hoàn toàn không nhìn thấy luồng log này nên giao thức JSON-RPC trên `stdout` được giữ sạch sẽ (clean). Đồng thời, lập trình viên vẫn có thể xem được log hệ thống in ra trên màn hình console của IDE hoặc terminal để phục vụ debug bình thường.
